@@ -1,0 +1,388 @@
+# TemplateName: serverless.yaml
+# TemplateType: Step Function with SNS, SQS, Lambda, S3 and CloudWatch Alarms
+# Version: 1.0.0
+# Owner: Subhamay Bhattacharyya
+# ProjectName: Tarius
+# Modification History:
+#   - 1.0.0  - Jun 16, 2023   -- Initial Version
+# Resources: 
+#   - One SNS Topic with KMS Encryption and Email Subscription.
+#   - One SQS Queue with KMS Encryption
+#   - One S3 Bucket with KMS Encryption
+#   - One Step Function with associated IAM execution role.
+#   - Two Lambda Functions with associated IAM Role
+#   - One Step function with associated IAM Role
+#   - Five CloudWatch Alarms for each of the Lambda functions.
+
+service: bellflower
+# app: 0038-bellflower-sls
+# org: subhamayaws
+package:
+  individually: true
+
+frameworkVersion: "^3.25.1"
+configValidationMode: off
+
+plugins:
+  - serverless-step-functions
+  - serverless-aws-nested-stacks
+
+params:
+  devl: 
+    kms-key-alias: "SB-KMS"
+    kms-key-id: "arn:aws:kms:us-east-1:807724355529:key/e4c733c5-9fbe-4a90-bda1-6f0362bc9b89"
+    sns-subscription-email: subhamay.bellflower.sls@mailinator.com
+    delay-seconds: 0
+    maximum-message-size: 262144
+    message-retention-period: 345600
+    receive-message-waittime-seconds:  0
+    message-visibility-timeout: 300
+    s3-custom-resource-stack-name: "bellflower-s3-custom-resource-stack"
+
+provider:
+  name: aws
+  stackName: ${self:service}-sls-stack
+  stage: devl
+  region: us-east-1
+  runtime: python3.9
+  architecture: x86_64
+  versionFunctions: false
+  memorySize: 256
+  timeout: 300
+  environment:
+    S3_BUCKET_NAME: ${self:custom.s3-bucket-name}
+  tags:
+    ProjectName: ${self:service}
+    Environment: ${self:provider.stage}
+  deploymentBucket:
+    name: subhamay-serverless-deploy-us-east-1
+    serverSideEncryption: aws:kms
+    sseKMSKeyId: ${param:kms-key-id}
+
+custom:
+  sf-iam-role: ${self:service}-sf-execution-role
+  sf-iam-policy: ${self:service}-sf-execution-policy
+  lambda-iam-role: ${self:service}-lambda-function-execution-role
+  lambda-iam-policy: ${self:service}-lambda-function-execution-policy
+  lambda-iam-role-arn: arn:aws:iam::${aws:accountId}:role/${self:custom.lambda-iam-role}
+  step-function-name: ${self:service}-state-machine-${self:provider.stage}-${self:provider.region}
+  sns-topic-name: ${self:service}-sns-topic-${self:provider.stage}-${self:provider.region}
+  sqs-queue-name: ${self:service}-sqs-queue-${self:provider.stage}-${self:provider.region}
+  s3-bucket-name: ${self:service}-integration-bucket-${aws:accountId}-${self:provider.stage}-${self:provider.region}
+  sqs-queue-arn: "arn:aws:sqs:${self:provider.region}:${aws:accountId}:${self:custom.sqs-queue-name}"
+  lambda-processing-name: ${self:service}-processing-lambda-${self:provider.stage}-${self:provider.region}
+  lambda-integration-name: ${self:service}-integration-lambda-${self:provider.stage}-${self:provider.region}
+  log-group-step-function-name: /aws/states/${self:service}-step-function-${self:provider.stage}-${self:provider.region}
+
+  nested-stacks:
+    location: "./nested-stacks"
+    stacks: 
+      - id: BellflowerSQSQueue
+        template: sqs-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters:
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          SQSQueueName: ${self:custom.sqs-queue-name}
+          DelaySeconds: ${param:delay-seconds}
+          MaximumMessageSize: ${param:maximum-message-size}
+          MessageRetentionPeriod: ${param:message-retention-period}
+          ReceiveMessageWaitTimeSeconds: ${param:receive-message-waittime-seconds}
+          VisibilityTimeout: ${param:message-visibility-timeout}
+          KmsMasterKeyAlias: ${param:kms-key-alias}
+      - id: BellflowerSNSTopic
+        template: sns-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters:
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          SNSTopicName: ${self:custom.sns-topic-name}
+          SNSTopicDisplayName: "SNS Topic name for sending result notification"
+          SNSSubscriptionEmail: "subhamay.aws@mailinator.com"
+          KmsMasterKeyAlias: ${param:kms-key-alias}
+      - id: BellflowerIAMRole
+        template: iam-role-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters: 
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          ProcessingLambdaFunctionName: ${self:custom.lambda-processing-name}
+          IntegrationLambdaFunctionName: ${self:custom.lambda-integration-name}
+          LambdaExecutionRoleName: ${self:custom.lambda-iam-role}
+          LambdaExecutionPolicyName: ${self:custom.lambda-iam-policy}
+          StepFunctionExecutionRoleName: ${self:custom.sf-iam-role}
+          StepFunctionExecutionPolicyName: ${self:custom.sf-iam-policy}
+          SQSQueueName: ${self:custom.sqs-queue-name}
+          SNSTopicName: ${self:custom.sns-topic-name}
+          S3BucketName: ${self:custom.s3-bucket-name} 
+          KmsMasterKeyId: ${param:kms-key-id}
+          StepFunctionName: ${self:custom.step-function-name}
+      - id: BellflowerS3Bucket
+        template: s3-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters: 
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          S3BucketName: ${self:custom.s3-bucket-name}
+          S3DataBucketFolder: "inbound,outbound"
+          S3BucketBlockPublicAcls: true
+          S3BucketBlockPublicPolicy: true
+          S3BucketIgnorePublicAcls: true
+          S3BucketRestrictPublicBuckets: true
+          S3CustomResourceStackName: ${param:s3-custom-resource-stack-name}
+          KmsMasterKeyAlias: ${param:kms-key-alias}
+      - id: BellflowerProcessingLambdaCloudWatchAlarms
+        template: cloudwatch-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters: 
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          LambdaFunctionName: ${self:custom.lambda-processing-name}
+          SNSTopicName:  ${self:custom.sns-topic-name}
+          AlarmNameLambdaInvocations:  ${self:service}-processing-lambda-invocations-alarm
+          AlarmPeriodInSecondsLambdaInvocations: 900
+          DatapointsToAlarmLambdaInvocations: 1
+          EvaluationPeriodsForLambdaInvocations: 1
+          AlarmComparisonOperatorLambdaInvocations: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaErrors:  ${self:service}-processing-lambda-errors-alarm
+          AlarmThresholdLambdaErrors: 2
+          AlarmPeriodInSecondsLambdaErrors: 900
+          DatapointsToAlarmLambdaErrors: 1
+          EvaluationPeriodsForLambdaErrors: 1
+          AlarmComparisonOperatorLambdaErrors: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaThrottles:  ${self:service}-processing-lambda-throttles-alarm
+          AlarmThresholdLambdaThrottles: 3
+          AlarmPeriodInSecondsLambdaThrottles: 600
+          DatapointsToAlarmLambdaThrottles: 1
+          EvaluationPeriodsForLambdaThrottles: 1
+          AlarmComparisonOperatorLambdaThrottles: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaDuration:  ${self:service}-processing-lambda-duration-alarm
+          AlarmThresholdLambdaDuration: 500
+          AlarmPeriodInSecondsLambdaDuration: 900
+          DatapointsToAlarmLambdaDuration: 1
+          EvaluationPeriodsForLambdaDuration: 1
+          AlarmComparisonOperatorLambdaDuration: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaConcurrentExecutions:  ${self:service}-processing-lambda-conc-exec-alarm
+          AlarmThresholdLambdaConcurrentExecutions: 3
+          AlarmPeriodInSecondsLambdaConcurrentExecutions: 60
+          DatapointsToAlarmLambdaConcurrentExecutions: 1
+          EvaluationPeriodsForLambdaConcurrentExecutions: 1
+          AlarmComparisonOperatorLambdaConcurrentExecutions: "GreaterThanOrEqualToThreshold"
+      - id: BellflowerIntegrationLambdaCloudWatchAlarms
+        template: cloudwatch-stack.yaml
+        enabled: true
+        timeout: 300
+        parameters: 
+          ProjectName: ${self:service}
+          Environment: ${self:provider.stage}
+          LambdaFunctionName: ${self:custom.lambda-integration-name}
+          SNSTopicName:  ${self:custom.sns-topic-name}
+          AlarmNameLambdaInvocations:  ${self:service}-integration-lambda-invocations-alarm
+          AlarmPeriodInSecondsLambdaInvocations: 900
+          DatapointsToAlarmLambdaInvocations: 1
+          EvaluationPeriodsForLambdaInvocations: 1
+          AlarmComparisonOperatorLambdaInvocations: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaErrors:  ${self:service}-integration-lambda-errors-alarm
+          AlarmThresholdLambdaErrors: 2
+          AlarmPeriodInSecondsLambdaErrors: 900
+          DatapointsToAlarmLambdaErrors: 1
+          EvaluationPeriodsForLambdaErrors: 1
+          AlarmComparisonOperatorLambdaErrors: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaThrottles:  ${self:service}-integration-lambda-throttles-alarm
+          AlarmThresholdLambdaThrottles: 3
+          AlarmPeriodInSecondsLambdaThrottles: 600
+          DatapointsToAlarmLambdaThrottles: 1
+          EvaluationPeriodsForLambdaThrottles: 1
+          AlarmComparisonOperatorLambdaThrottles: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaDuration:  ${self:service}-integration-lambda-duration-alarm
+          AlarmThresholdLambdaDuration: 500
+          AlarmPeriodInSecondsLambdaDuration: 900
+          DatapointsToAlarmLambdaDuration: 1
+          EvaluationPeriodsForLambdaDuration: 1
+          AlarmComparisonOperatorLambdaDuration: "GreaterThanOrEqualToThreshold"
+          AlarmNameLambdaConcurrentExecutions:  ${self:service}-integration-lambda-conc-exec-alarm
+          AlarmThresholdLambdaConcurrentExecutions: 3
+          AlarmPeriodInSecondsLambdaConcurrentExecutions: 60
+          DatapointsToAlarmLambdaConcurrentExecutions: 1
+          EvaluationPeriodsForLambdaConcurrentExecutions: 1
+          AlarmComparisonOperatorLambdaConcurrentExecutions: "GreaterThanOrEqualToThreshold"
+
+resources:
+  Description: >-
+    Project Bellflower: Root Stack Template to create a State Machine and associated services and IAM role to showcase callback pattern example (Amazon SQS, Amazon SNS, Lambda).
+
+  Resources:
+    #################################### Processing Lambda Log Group ###############################
+    BellflowerStateMachineLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        KmsKeyId: ${param:kms-key-id}
+        LogGroupName: ${self:custom.log-group-step-function-name}
+        RetentionInDays: 14
+        Tags:
+        - Key: Project
+          Value: ${self:service}
+        - Key: Environment
+          Value: ${self:provider.stage}
+  Outputs:
+    BellfloweSNSTopicArn:
+      Description: Arn of the SNS Topic
+      Value: !GetAtt  BellflowerSNSTopic.Outputs.SNSTopicArn
+    BellflowerSNSSubscriptionArn:
+      Description: Arn of the SNS Subscription Email
+      Value: !GetAtt BellflowerSNSTopic.Outputs.SNSSubscriptionArn
+    BellflowerSQSQueueArn:
+      Description: Arn of the SQS Queue
+      Value: !GetAtt BellflowerSQSQueue.Outputs.SQSQueueArn
+    BellflowerSQSQueueURL:
+      Description: Arn of the SQS Queue
+      Value: !GetAtt BellflowerSQSQueue.Outputs.SQSQueueURL
+    BellflowerS3BucketArn:
+      Description: Arn of the S3 integration bucket.
+      Value: !Sub "arn:${AWS::Partition}:s3:::${self:custom.s3-bucket-name}"
+    BellflowerLambdaExecutionRoleArn:
+      Description: Arn of the Bellflower Lambda Execution Role 
+      Value: !GetAtt BellflowerIAMRole.Outputs.LambdaExecutionRoleArn
+    BellflowerStepFunctionExecutionRoleArn:
+      Description: Arn of the Step Function Execution Role
+      Value: !GetAtt BellflowerIAMRole.Outputs.StepFunctionExecutionRoleArn
+    BellflowerStepFunctionArn: 
+      Description: Arn of the Bellflower Step Function
+      Value: !Sub "arn:${AWS::Partition}:states:${AWS::Partition}:${AWS::AccountId}:stateMachine:${self:custom.step-function-name}"
+    BellflowerStateMachineLogGroupArn:
+      Description: Arn of the Step Function Log Group
+      Value: !GetAtt BellflowerStateMachineLogGroup.Arn
+    BellflowerProcessingLambdaInvocationsAlarmArn:
+      Description: Bellflower Processing Lambda Invocations Alarm Arn 
+      Value: !GetAtt BellflowerProcessingLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaInvocationsArn
+    BellflowerProcessingLambdaErrorsAlarmArn:
+      Description: Bellflower Processing Lambda Errors Alarm Arn 
+      Value: !GetAtt BellflowerProcessingLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaErrorsArn
+    BellflowerProcessingLambdaThrottlesAlarmArn:
+      Description: Bellflower Processing Lambda Throttles Alarm Arn 
+      Value: !GetAtt BellflowerProcessingLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaThrottlesArn
+    BellflowerProcessingLambdaDurationAlarmArn:
+      Description: Bellflower LProcessing ambda Duration Alarm Arn 
+      Value: !GetAtt BellflowerProcessingLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaDurationArn
+    BellflowerProcessingLambdaConcurrentExecutionsAlarmArn:
+      Description: Bellflower Processing Lambda Concurrent Executions Alarm Arn 
+      Value: !GetAtt BellflowerProcessingLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaConurrentExecutionsArn
+    BellflowerIntegrationLambdaInvocationsAlarmArn:
+      Description: Bellflower Integration Lambda Invocations Alarm Arn 
+      Value: !GetAtt BellflowerIntegrationLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaInvocationsArn
+    BellflowerIntegrationLambdaErrorsAlarmArn:
+      Description: Bellflower Integration Lambda Errors Alarm Arn 
+      Value: !GetAtt BellflowerIntegrationLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaErrorsArn
+    BellflowerIntegrationLambdaThrottlesAlarmArn:
+      Description: Bellflower Integration Lambda Throttles Alarm Arn 
+      Value: !GetAtt BellflowerIntegrationLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaThrottlesArn
+    BellflowerIntegrationLambdaDurationAlarmArn:
+      Description: Bellflower LIntegration ambda Duration Alarm Arn 
+      Value: !GetAtt BellflowerIntegrationLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaDurationArn
+    BellflowerIntegrationLambdaConcurrentExecutionsAlarmArn:
+      Description: Bellflower Integration Lambda Concurrent Executions Alarm Arn 
+      Value: !GetAtt BellflowerIntegrationLambdaCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaConurrentExecutionsArn
+
+functions:
+  bellflower-processing-lambda:
+    handler: processing_lambda.lambda_handler
+    name: ${self:custom.lambda-processing-name}
+    description: "The Lambda Function to generate a list of random strings."
+    reservedConcurrency: 1
+    package:
+      artifact: s3://subhamay-projects-repository-us-east-1/0038-bellflower/code/python/processing_lambda.zip
+    role: ${self:custom.lambda-iam-role-arn}
+    dependsOn: BellflowerIAMRole
+  bellflower-integration-lambda:
+    handler: integration_lambda.lambda_handler
+    name: ${self:custom.lambda-integration-name}
+    description: "The Lambda Function to be used for callback functionality"
+    reservedConcurrency: 1
+    package:
+      artifact: s3://subhamay-projects-repository-us-east-1/0038-bellflower/code/python/integration_lambda.zip
+    role: ${self:custom.lambda-iam-role-arn}
+    events:
+      - sqs: 
+          arn: ${self:custom.sqs-queue-arn}
+          batchSize: 10
+      - s3:
+          bucket: ${self:custom.s3-bucket-name}
+          existing: true
+          event: s3:ObjectCreated:*
+          rules: 
+            - prefix: inbound/
+            - suffix: .json
+    dependsOn: BellflowerIAMRole 
+
+
+stepFunctions:
+  stateMachines:
+    BellflowerStateMachine:
+      name: ${self:custom.step-function-name}
+      role: !GetAtt BellflowerIAMRole.Outputs.StepFunctionExecutionRoleArn
+      loggingConfig:
+        level: ALL
+        includeExecutionData: true
+        destinations: 
+          - !GetAtt BellflowerStateMachineLogGroup.Arn
+      definition:
+        Comment: >-
+          Bellflower State Machine - Callback Pattern Example (Amazon SQS, Amazon SNS,
+          Lambda)
+        StartAt: Processing Lambda
+        TimeoutSeconds: 300
+        States:
+          Processing Lambda:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            OutputPath: $.Payload
+            Parameters:
+              Payload.$: $
+              FunctionName: arn:aws:lambda:${self:provider.region}:${aws:accountId}:function:${self:custom.lambda-processing-name}:$LATEST
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2
+                Comment: Automatic Retry 3 Times
+            InputPath: $
+            Next: Wait For Response
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: SNS Publish (Failure)
+          SNS Publish (Failure):
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              Message.$: $
+              TopicArn: !GetAtt  BellflowerSNSTopic.Outputs.SNSTopicArn
+            Next: Fail
+          Fail:
+            Type: Fail
+          Wait For Response:
+            Type: Task
+            Resource: arn:aws:states:::sqs:sendMessage.waitForTaskToken
+            Parameters:
+              QueueUrl: !GetAtt BellflowerSQSQueue.Outputs.SQSQueueURL
+              MessageBody:
+                Input.$: $
+                TaskToken.$: $$.Task.Token
+            ResultPath: null
+            Next: SNS Publish (Success)
+          SNS Publish (Success):
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              Message.$: $
+              TopicArn: !GetAtt  BellflowerSNSTopic.Outputs.SNSTopicArn
+            Next: Success
+          Success:
+            Type: Succeed
+      dependsOn: BellflowerIAMRole
